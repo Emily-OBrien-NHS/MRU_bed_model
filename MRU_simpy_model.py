@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 import matplotlib.pyplot as plt
 
 class default_params():
-    run_name = '8hr MRU LoS'
+    run_name = '6hr MRU LoS, 22 beds'
     #run times and iterations
     run_time = 525600
     run_days = int(run_time/(60*24))
@@ -57,9 +57,9 @@ class default_params():
 
     #LoS
     mean_ED_los = 120
-    mean_MRU_los = 60*8#*12
+    mean_MRU_los = 60*6
     #resources
-    no_MRU_beds = np.inf
+    no_MRU_beds = 22#np.inf
     #lists for storing results
     pat_res = []
     occ_res = []
@@ -69,7 +69,8 @@ class spawn_patient:
         self.id = p_id
         self.arrival = ''
         self.ED_arrival_time = np.nan
-        self.ED_leave_time = np.nan
+        #self.ED_leave_time = np.nan
+        self.MRU_wait_start_time = np.nan
         self.MRU_arrival_time = np.nan
         self.MRU_leave_time = np.nan
 
@@ -120,10 +121,10 @@ class mru_model:
 
     def MRU_journey(self, patient):
         #Enter MRU
-        patient.MRU_arrival_time = self.env.now
+        patient.MRU_wait_start_time = self.env.now
         with self.MRU_bed.request() as req:
             yield req
-            
+            patient.MRU_arrival_time = self.env.now
             sampled_MRU_time = random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los) 
             yield self.env.timeout(sampled_MRU_time)
@@ -139,13 +140,13 @@ class mru_model:
             sampled_ED_time = min(random.expovariate(1.0
                                                 / self.input_params.mean_ED_los), 240)
             yield self.env.timeout(sampled_ED_time)
-        patient.ED_leave_time = self.env.now
+        #patient.ED_leave_time = self.env.now
 
         #Enter MRU
-        patient.MRU_arrival_time = self.env.now
+        patient.MRU_wait_start_time = self.env.now
         with self.MRU_bed.request() as req:
             yield req
-            
+            patient.MRU_arrival_time = self.env.now
             sampled_MRU_time = random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los) 
             yield self.env.timeout(sampled_MRU_time)
@@ -156,7 +157,8 @@ class mru_model:
         self.patient_results.append([self.run_number, patient.id,
                                      patient.arrival,
                                      patient.ED_arrival_time,
-                                     patient.ED_leave_time,
+                                     #patient.ED_leave_time,
+                                     patient.MRU_wait_start_time,
                                      patient.MRU_arrival_time,
                                      patient.MRU_leave_time])
     
@@ -165,6 +167,7 @@ class mru_model:
             self.mru_occupancy_results.append([self.run_number,
                                                self.ED._env.now,
                                                self.ED.count,
+                                               len(self.MRU_bed.queue),
                                                self.MRU_bed.count])
             yield self.env.timeout(self.input_params.occ_sample_time)
 ########################RUN#######################
@@ -180,13 +183,16 @@ class mru_model:
 def export_results(run_days, pat_results, occ_results):
     patient_df = pd.DataFrame(pat_results,
                               columns=['Run', 'Patient ID', 'Arrival Method',
-                                       'ED Arrival Time', 'ED Leave Time', 
+                                       'ED Arrival Time', #'ED Leave Time', 
+                                       'MRU Wait Start Time',
                                        'MRU Arrival Time', 'MRU Leave Time'])
     patient_df['Simulation Arrival Time'] = (patient_df['ED Arrival Time']
-                                             .fillna(patient_df['MRU Arrival Time']))
+                                             .fillna(patient_df['MRU Wait Start Time']))
     patient_df['Simulation Arrival Day'] = pd.cut(
                            patient_df['Simulation Arrival Time'], bins=run_days,
                            labels=np.linspace(1, run_days, run_days))
+    patient_df['Wait for MRU Bed Time'] = (patient_df['MRU Arrival Time']
+                                           - patient_df['MRU Wait Start Time'])
     patient_df['Simulation Leave Day'] = pd.cut(
                                     patient_df['MRU Leave Time'], bins=run_days,
                                     labels=np.linspace(1, run_days, run_days))
@@ -196,7 +202,7 @@ def export_results(run_days, pat_results, occ_results):
     
     occupancy_df = pd.DataFrame(occ_results,
                                 columns=['Run', 'Time', 'ED Occupancy',
-                                         'MRU Occupancy'])
+                                'MRU Bed Queue', 'MRU Occupancy'])
     occupancy_df['day'] = pd.cut(occupancy_df['Time'], bins=run_days,
                                  labels=np.linspace(1, run_days, run_days))
     return patient_df, occupancy_df
@@ -216,21 +222,28 @@ def run_the_model(input_params):
 ###############################################################################
 #Run and save results
 pat, occ = run_the_model(default_params)
-pat.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/patients - {default_params.run_name}.csv')
-occ.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/occupancy - {default_params.run_name}.csv')
+pat.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Full Outputs/patients - {default_params.run_name}.csv')
+occ.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Full Outputs/occupancy - {default_params.run_name}.csv')
 
 ####MRU leavers plot
+font_size = 24
 MRU_discharges = (pat.groupby(['Run', 'Simulation Leave Hour'], as_index=False)
                   ['Patient ID'].count()
                   .groupby('Simulation Leave Hour').mean()
                   ['Patient ID'])
 MRU_discharges.columns = ['Hour', 'Patients Leaving MRU']
-plt.subplots(figsize=(30, 10))
-plt.plot(MRU_discharges.index, MRU_discharges)
-plt.xlabel = 'Hour'
-plt.ylabel = 'Patients Leaveing MRU'
-plt.title = f'Patients Leaving MRU per Hour - {default_params.run_name}'
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Patients Leaving MRU - {default_params.run_name}')
+daily_av = MRU_discharges.groupby((MRU_discharges.index/24).round()).mean()
+daily_av.index = daily_av.index * 24
+
+fig, axs = plt.subplots(figsize=(25, 10))
+axs.plot(MRU_discharges.index, MRU_discharges, color='grey', alpha=0.3, label='Hourly Leavers')
+axs.plot(daily_av.index, daily_av, 'r-', label='Daily Average Hourly Leavers')
+axs.set_title(f'Patients Leaving MRU per Hour - {default_params.run_name}', fontsize=font_size)
+axs.set_xlabel('Hour', fontsize=font_size)
+axs.set_ylabel('Patients Leaveing MRU', fontsize=font_size)
+axs.legend()
+axs.tick_params(axis='both',  which='major', labelsize=font_size)
+plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Patients Leaving MRU - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 ####Occupancy plot
@@ -249,21 +262,45 @@ min_occupancy.columns = ['Min ED', 'Min MRU']
 occupancy = min_occupancy.join(mean_occupancy).join(max_occupancy)
 
 ####ED
-plt.subplots(figsize=(30, 10))
-plt.plot(occupancy.index, occupancy['Mean ED Occupancy'], '-r')
-plt.fill_between(occupancy.index, occupancy['Min ED'], occupancy['Max ED'], color='grey', alpha=0.2)
-plt.title(f'Average Number of Patients in ED to go to MRU - {default_params.run_name}')
-plt.xlabel('Time (Mins)')
-plt.ylabel('No. Patients')
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/ED Occupancy - {default_params.run_name}')
+fig, axs = plt.subplots(figsize=(25, 10))
+axs.plot(occupancy.index, occupancy['Mean ED Occupancy'], '-r')
+axs.fill_between(occupancy.index, occupancy['Min ED'], occupancy['Max ED'], color='grey', alpha=0.2)
+axs.set_title(f'Average Number of Patients in ED to go to MRU - {default_params.run_name}', fontsize=font_size)
+axs.set_xlabel('Time (Mins)', fontsize=font_size)
+axs.set_ylabel('No. Patients', fontsize=font_size)
+axs.tick_params(axis='both',  which='major', labelsize=font_size)
+plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/ED Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 #MRU
-plt.subplots(figsize=(30, 10))
-plt.plot(occupancy.index, occupancy['Mean MRU Occupancy'], '-r')
-plt.fill_between(occupancy.index, occupancy['Min MRU'], occupancy['Max MRU'], color='grey', alpha=0.2)
-plt.title(f'Average Number of Patients in MRU - {default_params.run_name}')
-plt.xlabel('Time (Mins)')
-plt.ylabel('No. Patients')
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/MRU Occupancy - {default_params.run_name}')
+fig, axs = plt.subplots(figsize=(25, 10))
+axs.plot(occupancy.index, occupancy['Mean MRU Occupancy'], '-r')
+axs.fill_between(occupancy.index, occupancy['Min MRU'], occupancy['Max MRU'], color='grey', alpha=0.2)
+axs.set_title(f'Average Number of Patients in MRU - {default_params.run_name}', fontsize=font_size)
+axs.set_xlabel('Time (Mins)', fontsize=font_size)
+axs.set_ylabel('No. Patients', fontsize=font_size)
+axs.tick_params(axis='both',  which='major', labelsize=font_size)
+plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/MRU Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.close()
+
+#### MRU Bed queue
+queue = occ.groupby('day')['MRU Bed Queue'].mean()
+fig, axs = plt.subplots(figsize=(25, 10))
+axs.plot(queue.index, queue)
+axs.set_title(f'Average Number of Patients in MRU Queue - {default_params.run_name}', fontsize=font_size)
+axs.set_xlabel('Simulation Day', fontsize=font_size)
+axs.set_ylabel('No. Patients', fontsize=font_size)
+axs.tick_params(axis='both',  which='major', labelsize=font_size)
+plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Average Number of Patients in MRU Queue - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.close()
+
+#### MRU Bed Wait Time
+wait_for_bed = pat.groupby('Simulation Arrival Day')['Wait for MRU Bed Time'].mean() / 60
+fig, axs = plt.subplots(figsize=(25, 10))
+axs.plot(wait_for_bed.index, wait_for_bed)
+axs.set_title(f'Average Hours Waiting for MRU Bed - {default_params.run_name}', fontsize=font_size)
+axs.set_xlabel('Simulation Day', fontsize=font_size)
+axs.set_ylabel('Hours Waited', fontsize=font_size)
+axs.tick_params(axis='both',  which='major', labelsize=font_size)
+plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Average Wait for Bed Time - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
