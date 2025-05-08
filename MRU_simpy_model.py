@@ -222,8 +222,8 @@ def run_the_model(input_params):
 ###############################################################################
 #Run and save results
 pat, occ = run_the_model(default_params)
-pat.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Full Outputs/patients - {default_params.run_name}.csv')
-occ.to_csv(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Full Outputs/occupancy - {default_params.run_name}.csv')
+pat.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Full Outputs/patients - {default_params.run_name}.csv')
+occ.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Full Outputs/occupancy - {default_params.run_name}.csv')
 
 ####MRU leavers plot
 font_size = 24
@@ -243,7 +243,7 @@ axs.set_xlabel('Hour', fontsize=font_size)
 axs.set_ylabel('Patients Leaveing MRU', fontsize=font_size)
 axs.legend()
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Patients Leaving MRU - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Patients Leaving MRU - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 ####Occupancy plot
@@ -269,7 +269,7 @@ axs.set_title(f'Average Number of Patients in ED to go to MRU - {default_params.
 axs.set_xlabel('Time (Mins)', fontsize=font_size)
 axs.set_ylabel('No. Patients', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/ED Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/ED Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 #MRU
@@ -280,7 +280,7 @@ axs.set_title(f'Average Number of Patients in MRU - {default_params.run_name}', 
 axs.set_xlabel('Time (Mins)', fontsize=font_size)
 axs.set_ylabel('No. Patients', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/MRU Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/MRU Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 #### MRU Bed queue
@@ -291,7 +291,7 @@ axs.set_title(f'Average Number of Patients in MRU Queue - {default_params.run_na
 axs.set_xlabel('Simulation Day', fontsize=font_size)
 axs.set_ylabel('No. Patients', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Average Number of Patients in MRU Queue - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Number of Patients in MRU Queue - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
 
 #### MRU Bed Wait Time
@@ -302,5 +302,5 @@ axs.set_title(f'Average Hours Waiting for MRU Bed - {default_params.run_name}', 
 axs.set_xlabel('Simulation Day', fontsize=font_size)
 axs.set_ylabel('Hours Waited', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/MRU/Simpy Model/Results/Average Wait for Bed Time - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Wait for Bed Time - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
 plt.close()
