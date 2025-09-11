@@ -1,65 +1,127 @@
+import re
 import simpy
 import random
 import math
+import itertools
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from sqlalchemy import create_engine
 import matplotlib.pyplot as plt
+from uhpt_population_projection import age_bands
+
 
 class default_params():
-    run_name = '6hr MRU LoS, 22 beds'
+    run_name = 'MRU new build'
     #run times and iterations
-    run_time = 525600
-    run_days = int(run_time/(60*24))
-    iterations = 10
+    start_year = datetime.today().year
+    run_years = 10
+    run_time = run_years * (365 * (60*24))
+    #run_time = 525600
+    iterations = 1
     occ_sample_time = 60
     #arrivals
     sdmart_engine = create_engine('mssql+pyodbc://@SDMartDataLive2/InfoDB?'\
-                              'trusted_connection=yes&driver=ODBC+Driver+17'\
-                              '+for+SQL+Server')
-    arrivals_query = """
-    select [Ward Stay Start Datetime] = sstay_start_dttm,
-    [Ward Stay End Datetime]	= sstay_end_dttm,
-    [ED Arrival Datetime]		= ArrivalDateTime,
-    [ED Departure Datetime]	= DischargeDateTime
-		
-    from [pimsmarts].[dbo].[ip_movements] as IP_MO
-    Inner join [infodb].[dbo].[vw_ipdc_fces_pfmgt] as INPAT on INPAT.prvsp_refno = IP_MO.prvsp_refno --Inner join, as I only want the matches
-    Left join [PiMSMarts].[dbo].[cset_admet] as ADMET on ADMET.identifier = INPAT.admet	--Just to get the admet description
-    Left join [CL3-data].[DataWarehouse].[ed].[vw_EDAttendance]	as EDATN on EDATN.admitprvsprefno = IP_MO.prvsp_refno
+                                  'trusted_connection=yes&driver=ODBC+Driver+17'\
+                                  '+for+SQL+Server')
+    arrivals_query = """SET NOCOUNT ON
+    SELECT *
+    INTO #MRU
+    FROM
+        (SELECT IPMOV.prvsp_refno, sstay_start_dttm, sstay_end_dttm, [pat_age_on_admit],
+            ROW_NUMBER() OVER (PARTITION BY IPMOV.prvsp_refno ORDER BY IPMOV.sstay_start_dttm ASC) AS rn
+        FROM  SDMARTDATALIVE2.pimsmarts.dbo.ip_movements   AS IPMOV
+        LEFT JOIN SDMARTDATALIVE2.[infodb].[dbo].[vw_ipdc_fces_pfmgt] AS INPAT ON INPAT.prvsp_refno = IPMOV.prvsp_refno
+        LEFT JOIN SDMARTDATALIVE2.PiMSMarts.dbo.cset_admet AS ADMET ON ADMET.identifier = INPAT.admet
+        WHERE IPMOV.move_reason_sp  = 'S' --Ward stay not consultant change
+        AND INPAT.last_episode_in_spell = '1'
+        AND IPMOV.sstay_end_dttm IS NOT NULL 
+        AND IPMOV.sstay_ward_code IN ('RK950116', 'RK950AMW', 'RK950MAU')  --Medical Receiving Unit - Tamar Ward, Zone B, Level 6
+        AND sstay_start_dttm >=	'01/08/2024' --Start of window
+        AND sstay_start_dttm <=	'31/03/2025 23:59:59') MRU
+    WHERE rn = 1
 
-    Where sstay_start_dttm >=	'01/08/2024' --Start of window
-    and sstay_start_dttm <=	'31/03/2025 23:59:59' --End of window
-    and move_reason_sp = 'S' --Ward stay not consultant change
-    and INPAT.admit_dttm = IP_MO.sstay_start_dttm --Ensuring 1st ward
-    and INPAT.admit_dttm = INPAT.start_dttm	--Ensuring vw_ipdc_fces_pfmgt is reduced down to spell level rather than episode level
-    and	IP_MO.sstay_ward_code in ('RK950116', 'RK950AMW', 'RK950MAU') --Thrushel - MAU, Zone A, Level 6
-    and	(INPAT.admit_dttm >= ArrivalDateTime or ArrivalDateTime is null) --Bringing in the ED view introduced duplicates, as per the validation below. 
-    """
+    SELECT [Ward Stay Start Datetime] = sstay_start_dttm,
+    [Ward Stay End Datetime] = sstay_end_dttm,
+    [pat_age_on_admit] AS Age,
+    [ED Arrival Datetime] = ArrivalDateTime,
+    [ED Departure Datetime]	= DischargeDateTime
+    FROM #MRU
+    LEFT JOIN [CL3-data].[DataWarehouse].[ed].[vw_EDAttendance]	AS EDATN ON EDATN.admitprvsprefno = prvsp_refno"""
     arrivals = pd.read_sql(arrivals_query, sdmart_engine)
-    #Get ED inter arrival time by hour of day
-    arrivals['ED Hour'] = arrivals['ED Arrival Datetime'].dt.hour
-    arrivals['ED Date'] = arrivals['ED Arrival Datetime'].dt.date
-    mean_ED_arr = (60 /
-                   (arrivals.groupby([arrivals['ED Date'], arrivals['ED Hour']],
-                                     dropna=True, as_index=False)
-                                     ['ED Arrival Datetime'].count()
-                            .groupby(arrivals['ED Hour'])['ED Arrival Datetime']
-                            .mean()))
-    #Get External inter arrival time by hour of day
-    arrivals['EXT Hour'] = arrivals['Ward Stay Start Datetime'].dt.hour
-    arrivals['EXT Date'] = arrivals['Ward Stay Start Datetime'].dt.date
-    mean_EXT_arr = (60 /
-                    (arrivals.loc[arrivals['ED Arrival Datetime'].isna()]
-                    .groupby(['EXT Date', 'EXT Hour'], as_index=False)
-                             ['Ward Stay Start Datetime'].count()
-                    .groupby('EXT Hour')['Ward Stay Start Datetime'].mean()))
+    arrivals['Date'] = arrivals['Ward Stay End Datetime'].dt.date
+    print(f'Average Real Daily arrivals {arrivals['Date'].value_counts().mean()}')
+
+    #Put arrivals into age bands
+    banding = age_bands(arrivals['Age'])
+    arrivals['Age Bands'] = [band if int(re.findall(r'\d+', band)[0]) < 90
+                                  else '90 and over' for band in banding[0]]
+                                  
+    #Read in the year on year population change, get a list of years to forecast
+    change = pd.read_csv(
+             'C:/Users/obriene/Projects/Discrete Event Simulation/MSDEC model/UHPT Population Change.csv'
+             ).set_index('Age Bands')
+    years = [int(col) for col in change.columns]
+    change.columns = years
+    years = [int(datetime.today().year)] + years
+    
+    def inter_arrivals(data, arr_col, change, years):
+        #Get the hour and date part of the arrival datetime
+        data['Hour'] = data[arr_col].dt.hour
+        data['Date'] = data[arr_col].dt.date
+        #Get the number of data for each day and hour
+        mean_arr = (data.groupby(['Age Bands', 'Date', 'Hour'],
+                                        dropna=True, as_index=False)
+                                        [arr_col].count())
+        #Create a cross tab for all ages, dates and hours.  Join this to data
+        #and fill in 0 where no arrivals for that age band on that date/hour.
+        crosstab = pd.DataFrame(itertools.product(
+                            data['Age Bands'].drop_duplicates(),
+                            data['Date'].drop_duplicates(),
+                            data['Hour'].drop_duplicates()),
+                            columns=['Age Bands', 'Date', 'Hour'])
+        mean_arr = crosstab.merge(mean_arr, on=['Age Bands', 'Date', 'Hour'],
+                                  how='left').fillna(0)
+        #Get the average number of arrivals per hour for each age band. If 0,
+        #Replace with forward or back fill, to avoid divion by 0 when getting
+        #inter arrival times.
+        mean_arr = (mean_arr.groupby(['Age Bands', 'Hour'])[arr_col].mean()
+                    .replace(0, np.nan).groupby(['Age Bands', 'Hour'])
+                    .ffill().bfill())
+        #Loop through each age group and using current arrival numbers, use the
+        #population projections to simulate number of arrivals in n years
+        change = pd.DataFrame(mean_arr).join(change)
+        projections = []
+        for row in change.values.tolist():
+            start = row[0]
+            props = row[1:]
+            new_row = [start]
+            for prop in props:
+                start *= prop
+                new_row.append(start)
+            projections.append(new_row)
+        #Create data frame and transform into inter arrival times
+        daily_arrivals = pd.DataFrame(projections, columns=years,
+                                      index=change.index)
+        daily_arrivals = daily_arrivals.groupby('Hour').sum()
+        inter_arr = 60 / daily_arrivals
+        return inter_arr#daily_arrivals
+    
+    ED_arr = inter_arrivals(arrivals, 'ED Arrival Datetime', change, years)
+    EXT = arrivals.loc[arrivals['ED Arrival Datetime'].isna()].copy()
+    EXT_arr = inter_arrivals(EXT, 'Ward Stay Start Datetime', change, years)
+
+    (60/ED_arr).sum() + (60/EXT_arr).sum()
 
     #LoS
     mean_ED_los = 120
-    mean_MRU_los = 60*6
+    mean_MRU_los = 60*8
+    max_MRU_los = 60*24
+    #Discharge times
+    dis_start = 8
+    dis_end = 22
     #resources
-    no_MRU_beds = 22#np.inf
+    no_MRU_beds = np.inf
     #lists for storing results
     pat_res = []
     occ_res = []
@@ -67,9 +129,10 @@ class default_params():
 class spawn_patient:
     def __init__(self, p_id):
         self.id = p_id
+        self.age_band = np.nan
         self.arrival = ''
+        self.arrival_year = np.nan
         self.ED_arrival_time = np.nan
-        #self.ED_leave_time = np.nan
         self.MRU_wait_start_time = np.nan
         self.MRU_arrival_time = np.nan
         self.MRU_leave_time = np.nan
@@ -83,10 +146,24 @@ class mru_model:
         self.input_params = input_params
         self.patient_counter = 0
         self.run_number = run_number
+        self.year = self.input_params.start_year #set start year
         #establish resources
         self.MRU_bed = simpy.Resource(self.env,
                                       capacity=input_params.no_MRU_beds)
         self.ED = simpy.Resource(self.env, capacity = np.inf)
+
+    ############################INCREASE YEAR###############################
+    def increase_year(self):
+        while True:
+            yield self.env.timeout(365*24*60)
+            self.year += 1
+
+    ###########################MODEL TIME#############################
+    def model_time(self, time):
+        #Work out what day and time it is in the model.
+        day = math.floor(time / (24*60))
+        hour = math.floor((time % (day*(24*60)) if day != 0 else time) / 60)
+        return day, hour
     
     ########################ARRIVALS################################
     def ED_arrivals(self):
@@ -95,26 +172,28 @@ class mru_model:
             self.patient_counter += 1
             p = spawn_patient(self.patient_counter)
             p.arrival = 'ED'
+            p.arrival_year = self.year
             #begin patient ED process
             self.env.process(self.ED_to_MRU_journey(p))
             #randomly sample the time until the next patient arrival
             time_of_day = math.floor(self.env.now % (60*24) / 60)
-            ED_arr = self.input_params.mean_ED_arr[time_of_day]
-            sampled_interarrival = random.expovariate(1.0 / ED_arr)
+            ED_arr = self.input_params.ED_arr.loc[time_of_day, self.year]
+            sampled_interarrival = round(random.expovariate(1.0 / ED_arr))
             yield self.env.timeout(sampled_interarrival)
     
-    def External_arrivals(self):
+    def External_arrivals(self):#, age_band):
         while True:
             #up patient counter and spawn a new walk-in patient
             self.patient_counter += 1
             p = spawn_patient(self.patient_counter)
             p.arrival = 'External'
+            p.arrival_year = self.year
             #begin patient ED process
             self.env.process(self.MRU_journey(p))
             #randomly sample the time until the next patient arrival
             time_of_day = math.floor(self.env.now % (60*24) / 60)
-            EXT_arr = self.input_params.mean_EXT_arr[time_of_day]
-            sampled_interarrival = random.expovariate(1.0 / EXT_arr)
+            EXT_arr = self.input_params.EXT_arr.loc[time_of_day, self.year]
+            sampled_interarrival = round(random.expovariate(1.0 / EXT_arr))
             yield self.env.timeout(sampled_interarrival)
     
     ##################ED TO MRU PROCESS #########################
@@ -124,9 +203,16 @@ class mru_model:
         patient.MRU_wait_start_time = self.env.now
         with self.MRU_bed.request() as req:
             yield req
-            patient.MRU_arrival_time = self.env.now
-            sampled_MRU_time = random.expovariate(1.0
-                                                / self.input_params.mean_MRU_los) 
+            #Get the arrival time and initial sampled length of stay
+            arr_time = self.env.now
+            patient.MRU_arrival_time = arr_time
+            sampled_MRU_time = round((random.expovariate(1.0
+                                                / self.input_params.mean_MRU_los)))
+            #If sampled LoS is greater than the max, resample until under.
+            while sampled_MRU_time > self.input_params.max_MRU_los:
+                sampled_MRU_time = round((random.expovariate(1.0
+                                                / self.input_params.mean_MRU_los)))
+            #Patient holds MRU bed for the sampled MRU time
             yield self.env.timeout(sampled_MRU_time)
         patient.MRU_leave_time = self.env.now
         self.store_patient_results(patient)
@@ -137,27 +223,33 @@ class mru_model:
         with self.ED.request() as req:
             yield req
             #randomly sample the time spent in ED
-            sampled_ED_time = min(random.expovariate(1.0
-                                                / self.input_params.mean_ED_los), 240)
+            sampled_ED_time = round(min(random.expovariate(1.0
+                                                / self.input_params.mean_ED_los), 240))
             yield self.env.timeout(sampled_ED_time)
-        #patient.ED_leave_time = self.env.now
 
         #Enter MRU
         patient.MRU_wait_start_time = self.env.now
         with self.MRU_bed.request() as req:
             yield req
-            patient.MRU_arrival_time = self.env.now
-            sampled_MRU_time = random.expovariate(1.0
-                                                / self.input_params.mean_MRU_los) 
+            #Get the arrival time and initial sampled length of stay
+            arr_time = self.env.now
+            patient.MRU_arrival_time = arr_time
+            sampled_MRU_time = round(random.expovariate(1.0
+                                                / self.input_params.mean_MRU_los))
+            #If sampled LoS is greater than the max, resample until under.
+            while sampled_MRU_time > self.input_params.max_MRU_los:
+                sampled_MRU_time = round((random.expovariate(1.0
+                                                / self.input_params.mean_MRU_los)))
+            #Patient holds MRU bed for the sampled MRU time
             yield self.env.timeout(sampled_MRU_time)
         patient.MRU_leave_time = self.env.now
         self.store_patient_results(patient)
+
 ###################RECORD RESULTS####################
     def store_patient_results(self, patient):
         self.patient_results.append([self.run_number, patient.id,
-                                     patient.arrival,
+                                     patient.arrival, patient.arrival_year,
                                      patient.ED_arrival_time,
-                                     #patient.ED_leave_time,
                                      patient.MRU_wait_start_time,
                                      patient.MRU_arrival_time,
                                      patient.MRU_leave_time])
@@ -166,12 +258,14 @@ class mru_model:
         while True:
             self.mru_occupancy_results.append([self.run_number,
                                                self.ED._env.now,
+                                               self.year,
                                                self.ED.count,
                                                len(self.MRU_bed.queue),
                                                self.MRU_bed.count])
             yield self.env.timeout(self.input_params.occ_sample_time)
 ########################RUN#######################
     def run(self):
+        self.env.process(self.increase_year())
         self.env.process(self.ED_arrivals())
         self.env.process(self.External_arrivals())
         self.env.process(self.store_occupancy())
@@ -180,41 +274,40 @@ class mru_model:
         default_params.occ_res += self.mru_occupancy_results
         return self.patient_results, self.mru_occupancy_results
 
-def export_results(run_days, pat_results, occ_results):
+def export_results(pat_results, occ_results):
     patient_df = pd.DataFrame(pat_results,
-                              columns=['Run', 'Patient ID', 'Arrival Method',
-                                       'ED Arrival Time', #'ED Leave Time', 
+                              columns=['Run', 'Patient ID',
+                                       'Arrival Method',
+                                       'Arrival Year',
+                                       'ED Arrival Time',
                                        'MRU Wait Start Time',
                                        'MRU Arrival Time', 'MRU Leave Time'])
     patient_df['Simulation Arrival Time'] = (patient_df['ED Arrival Time']
                                              .fillna(patient_df['MRU Wait Start Time']))
-    patient_df['Simulation Arrival Day'] = pd.cut(
-                           patient_df['Simulation Arrival Time'], bins=run_days,
-                           labels=np.linspace(1, run_days, run_days))
+    patient_df['Simulation Arrival Day'] = patient_df['Simulation Arrival Time'] // (24*60) 
+    patient_df['MRU Arrival Hour'] = ((patient_df['MRU Arrival Time'] / 60)
+                                      % 24).apply(np.floor)
     patient_df['Wait for MRU Bed Time'] = (patient_df['MRU Arrival Time']
                                            - patient_df['MRU Wait Start Time'])
-    patient_df['Simulation Leave Day'] = pd.cut(
-                                    patient_df['MRU Leave Time'], bins=run_days,
-                                    labels=np.linspace(1, run_days, run_days))
-    patient_df['Simulation Leave Hour'] = (patient_df['MRU Leave Time']
-                                           / 60).round().astype(int)
+    patient_df['Simulation Leave Day'] = patient_df['MRU Leave Time']// (24*60)
+    patient_df['Simulation Leave Hour'] = ((patient_df['MRU Leave Time'] / 60)
+                                           % 24).apply(np.floor)
 
     
     occupancy_df = pd.DataFrame(occ_results,
-                                columns=['Run', 'Time', 'ED Occupancy',
+                                columns=['Run', 'Time', 'Year', 'ED Occupancy',
                                 'MRU Bed Queue', 'MRU Occupancy'])
-    occupancy_df['day'] = pd.cut(occupancy_df['Time'], bins=run_days,
-                                 labels=np.linspace(1, run_days, run_days))
+    occupancy_df['day'] = occupancy_df['Time'] // (24*60)
+    occupancy_df['hour'] = ((occupancy_df['Time'] / 60) % 24).apply(np.floor)
     return patient_df, occupancy_df
 
 def run_the_model(input_params):
     #run the model for the number of iterations specified
-    #for run in stqdm(range(input_params.iterations), desc='Simulation progress...'):
     for run in range(input_params.iterations):
         print(f"Run {run+1} of {input_params.iterations}")
         model = mru_model(run, input_params)
         model.run()
-    patient_df, occ_df = export_results(input_params.run_days,
+    patient_df, occ_df = export_results(
                                         input_params.pat_res,
                                         input_params.occ_res)
     return patient_df, occ_df
@@ -225,62 +318,75 @@ pat, occ = run_the_model(default_params)
 pat.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Full Outputs/patients - {default_params.run_name}.csv')
 occ.to_csv(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Full Outputs/occupancy - {default_params.run_name}.csv')
 
-####MRU leavers plot
+#Quartiles and font size
+def q25(x):
+    return x.quantile(0.25)
+def q75(x):
+    return x.quantile(0.75)
 font_size = 24
-MRU_discharges = (pat.groupby(['Run', 'Simulation Leave Hour'], as_index=False)
+
+####arrivals by hour of day
+MRU_arrivals = (pat.groupby(['Run', 'Simulation Arrival Day', 'MRU Arrival Hour'], as_index=False)
+                ['Patient ID'].count()
+                .groupby('MRU Arrival Hour')['Patient ID'].mean())
+MRU_arrivals.name = 'Arrivals'
+#discharged
+MRU_discharges = (pat.groupby(['Run', 'Simulation Leave Day', 'Simulation Leave Hour'], as_index=False)
                   ['Patient ID'].count()
-                  .groupby('Simulation Leave Hour').mean()
-                  ['Patient ID'])
-MRU_discharges.columns = ['Hour', 'Patients Leaving MRU']
-daily_av = MRU_discharges.groupby((MRU_discharges.index/24).round()).mean()
-daily_av.index = daily_av.index * 24
+                  .groupby('Simulation Leave Hour')['Patient ID'].mean())
+MRU_discharges.name = 'Discharges'
+#combine
+MRU_in_out = pd.DataFrame([MRU_arrivals, MRU_discharges]).T
+#occupancy
+MRU_occupancy = occ.groupby('hour')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max'])
+hours = MRU_occupancy.index
 
-fig, axs = plt.subplots(figsize=(25, 10))
-axs.plot(MRU_discharges.index, MRU_discharges, color='grey', alpha=0.3, label='Hourly Leavers')
-axs.plot(daily_av.index, daily_av, 'r-', label='Daily Average Hourly Leavers')
-axs.set_title(f'Patients Leaving MRU per Hour - {default_params.run_name}', fontsize=font_size)
-axs.set_xlabel('Hour', fontsize=font_size)
-axs.set_ylabel('Patients Leaveing MRU', fontsize=font_size)
-axs.legend()
-axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Patients Leaving MRU - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+#plot
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(20, 10), sharex=True)
+fig.suptitle('MRU by Hour of Day', fontsize=24)
+ax1.plot(hours, MRU_occupancy['mean'].fillna(0), '-r', label='Mean')
+ax1.fill_between(hours, MRU_occupancy['min'].fillna(0), MRU_occupancy['max'].fillna(0), color='grey', alpha=0.2, label='Min-Max')
+ax1.fill_between(hours, MRU_occupancy['q25'].fillna(0), MRU_occupancy['q75'].fillna(0), color='black', alpha=0.2, label='LQ-UQ')
+ax1.set_title('Occupancy', fontsize=18)
+ax1.set_xlabel('Hour of Day', fontsize=18)
+ax1.set_ylabel('No. Beds Occupied', fontsize=18)
+ax1.tick_params(axis='both',  which='major', labelsize=18)
+ax1.legend(fontsize=18)
+MRU_in_out.plot(ax=ax2)
+ax2.set_title('Arrivals/Discharges', fontsize=18)
+ax2.set_xlabel('Hour of Day', fontsize=18)
+ax2.tick_params(axis='both',  which='major', labelsize=18)
+fig.tight_layout()
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Hour of Day Occ, Arr and Dis - {default_params.run_name}.png', bbox_inches='tight', dpi=1200)
 plt.close()
 
-####Occupancy plot
-mean_occupancy = (occ.groupby(['Run', 'Time'], as_index=False)
-                 [['ED Occupancy', 'MRU Occupancy']].mean().groupby('Time')
-                 [['ED Occupancy', 'MRU Occupancy']].mean()).round().astype(int)
-mean_occupancy.columns = ['Mean ED Occupancy', 'Mean MRU Occupancy']
-max_occupancy = (occ.groupby(['Run', 'Time'], as_index=False)
-                 [['ED Occupancy', 'MRU Occupancy']].max().groupby('Time')
-                 [['ED Occupancy', 'MRU Occupancy']].max())
-max_occupancy.columns = ['Max ED', 'Max MRU']
-min_occupancy = (occ.groupby(['Run', 'Time'], as_index=False)
-                 [['ED Occupancy', 'MRU Occupancy']].min().groupby('Time')
-                 [['ED Occupancy', 'MRU Occupancy']].min())
-min_occupancy.columns = ['Min ED', 'Min MRU']
-occupancy = min_occupancy.join(mean_occupancy).join(max_occupancy)
-
-####ED
-fig, axs = plt.subplots(figsize=(25, 10))
-axs.plot(occupancy.index, occupancy['Mean ED Occupancy'], '-r')
-axs.fill_between(occupancy.index, occupancy['Min ED'], occupancy['Max ED'], color='grey', alpha=0.2)
-axs.set_title(f'Average Number of Patients in ED to go to MRU - {default_params.run_name}', fontsize=font_size)
-axs.set_xlabel('Time (Mins)', fontsize=font_size)
-axs.set_ylabel('No. Patients', fontsize=font_size)
-axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/ED Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
-plt.close()
-
-#MRU
-fig, axs = plt.subplots(figsize=(25, 10))
-axs.plot(occupancy.index, occupancy['Mean MRU Occupancy'], '-r')
-axs.fill_between(occupancy.index, occupancy['Min MRU'], occupancy['Max MRU'], color='grey', alpha=0.2)
-axs.set_title(f'Average Number of Patients in MRU - {default_params.run_name}', fontsize=font_size)
-axs.set_xlabel('Time (Mins)', fontsize=font_size)
-axs.set_ylabel('No. Patients', fontsize=font_size)
-axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/MRU Occupancy - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+####occupancy by year
+#Set formats
+whis = (5, 95)
+boxprops = dict(linestyle='-', linewidth=3, color='black')
+whiskerprops = dict(linestyle='-', linewidth=3, color='black')
+capprops = dict(linestyle='-', linewidth=3, color='black')
+medianprops = dict(linestyle='-', linewidth=2.5, color='firebrick')
+meanlineprops = dict(linestyle='--', linewidth=2.5, color='firebrick')
+flierprops = dict(marker='o', markerfacecolor='grey', markersize=5, markeredgecolor='none')
+#Create box plot for each year
+columns = occ['Year'].drop_duplicates().to_list()
+fig, ax = plt.subplots(figsize=(20,10))
+for position, column in enumerate(columns):
+    bp = ax.boxplot(occ.loc[occ['Year'] == column, 'MRU Occupancy'], positions=[position],
+                    sym='.', widths=0.9, whis=whis, showmeans=True,  meanline=True,
+                    boxprops=boxprops, medianprops=medianprops,
+                    whiskerprops=whiskerprops,
+                    flierprops=flierprops, capprops=capprops,
+                    meanprops=meanlineprops)
+#Create and save figure
+ax.set_yticks(range(occ['MRU Occupancy'].max()+1))
+ax.set_xticklabels(columns, fontdict={'fontsize':20})
+ax.set_xlim(xmin=-0.5)
+ax.set_title(f'{default_params.run_name} MRU Chair Occupancy Box Plots by Year ({whis[0]}% - {whis[1]}%)', fontdict={'fontsize':20})
+plt.legend([bp['medians'][0], bp['means'][0]], ['median', 'mean'])
+ax.grid()
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/{default_params.run_name} MRU Occupancy Box Plots by Year.png', bbox_inches='tight')
 plt.close()
 
 #### MRU Bed queue
@@ -291,7 +397,7 @@ axs.set_title(f'Average Number of Patients in MRU Queue - {default_params.run_na
 axs.set_xlabel('Simulation Day', fontsize=font_size)
 axs.set_ylabel('No. Patients', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Number of Patients in MRU Queue - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Number of Patients in MRU Queue - {default_params.run_name}.png', bbox_inches='tight', dpi=1200)
 plt.close()
 
 #### MRU Bed Wait Time
@@ -302,5 +408,17 @@ axs.set_title(f'Average Hours Waiting for MRU Bed - {default_params.run_name}', 
 axs.set_xlabel('Simulation Day', fontsize=font_size)
 axs.set_ylabel('Hours Waited', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
-plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Wait for Bed Time - {default_params.run_name}.svg', bbox_inches='tight', dpi=1200)
+plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Wait for Bed Time - {default_params.run_name}.png', bbox_inches='tight', dpi=1200)
 plt.close()
+
+#Summary numbers
+print('---------------------')
+print('Arrivals Summary:')
+print(pat.groupby(['Run', 'Simulation Arrival Day', 'Arrival Year'],
+                  as_index=False)['Patient ID'].count()
+         .groupby('Arrival Year')['Patient ID']
+         .agg(['min', q25, 'mean', q75, 'max']))
+print('---------------------')
+print('Occupancy Summary:')
+print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max']).round(2))
+print('---------------------')
