@@ -18,13 +18,15 @@ class default_params():
     run_years = 10
     run_time = run_years * (365 * (60*24))
     #run_time = 525600
-    iterations = 1
+    iterations = 10
     occ_sample_time = 60
     #arrivals
     sdmart_engine = create_engine('mssql+pyodbc://@SDMartDataLive2/InfoDB?'\
                                   'trusted_connection=yes&driver=ODBC+Driver+17'\
                                   '+for+SQL+Server')
-    arrivals_query = """SET NOCOUNT ON
+    start_dttm = '01/08/2024'
+    end_dttm = '31/03/2025 23:59:59'
+    arrivals_query = f"""SET NOCOUNT ON
     SELECT *
     INTO #MRU
     FROM
@@ -37,8 +39,8 @@ class default_params():
         AND INPAT.last_episode_in_spell = '1'
         AND IPMOV.sstay_end_dttm IS NOT NULL 
         AND IPMOV.sstay_ward_code IN ('RK950116', 'RK950AMW', 'RK950MAU')  --Medical Receiving Unit - Tamar Ward, Zone B, Level 6
-        AND sstay_start_dttm >=	'01/08/2024' --Start of window
-        AND sstay_start_dttm <=	'31/03/2025 23:59:59') MRU
+        AND sstay_start_dttm >=	'{start_dttm}' --Start of window
+        AND sstay_start_dttm <=	'{end_dttm}') MRU
     WHERE rn = 1
 
     SELECT [Ward Stay Start Datetime] = sstay_start_dttm,
@@ -48,8 +50,9 @@ class default_params():
     [ED Departure Datetime]	= DischargeDateTime
     FROM #MRU
     LEFT JOIN [CL3-data].[DataWarehouse].[ed].[vw_EDAttendance]	AS EDATN ON EDATN.admitprvsprefno = prvsp_refno"""
-    arrivals = pd.read_sql(arrivals_query, sdmart_engine)
-    arrivals['Date'] = arrivals['Ward Stay End Datetime'].dt.date
+    arrivals = pd.read_sql(arrivals_query, sdmart_engine).sort_values(by='Ward Stay Start Datetime')
+    arrivals['Date'] = arrivals['Ward Stay Start Datetime'].dt.date
+    arrivals['ED Date'] = arrivals['ED Arrival Datetime'].dt.date
     print(f'Average Real Daily arrivals {arrivals['Date'].value_counts().mean()}')
 
     #Put arrivals into age bands
@@ -105,13 +108,24 @@ class default_params():
                                       index=change.index)
         daily_arrivals = daily_arrivals.groupby('Hour').sum()
         inter_arr = 60 / daily_arrivals
-        return inter_arr#daily_arrivals
+        return daily_arrivals # itner_arr
     
-    ED_arr = inter_arrivals(arrivals, 'ED Arrival Datetime', change, years)
+    #In data, sometimes patients come to ED months before MRU (despite matching
+    #prvsp_refno), so need to filter ED arrivals to between the same time period
+    #to prevent arrivals being too low.
+    ED = arrivals.loc[(arrivals['ED Arrival Datetime']
+                       > pd.to_datetime(start_dttm, dayfirst=True))
+                    & (arrivals['ED Arrival Datetime']
+                       < pd.to_datetime(end_dttm, dayfirst=True))].copy()  
+    ED_arr = inter_arrivals(ED, 'ED Arrival Datetime', change, years)
     EXT = arrivals.loc[arrivals['ED Arrival Datetime'].isna()].copy()
     EXT_arr = inter_arrivals(EXT, 'Ward Stay Start Datetime', change, years)
 
-    (60/ED_arr).sum() + (60/EXT_arr).sum()
+    print(f'ED Average Real Daily arrivals {ED['ED Date'].value_counts().mean()}')
+    print(f'EXT Average Real Daily arrivals {EXT['Date'].value_counts().mean()}')
+    print(pd.DataFrame([ED_arr.sum(), (EXT_arr).sum(),
+                        ED_arr.sum() + (EXT_arr).sum()],
+                        index=['ED', 'EXT', 'TOTAL']).T)
 
     #LoS
     mean_ED_los = 120
@@ -177,7 +191,27 @@ class mru_model:
             self.env.process(self.ED_to_MRU_journey(p))
             #randomly sample the time until the next patient arrival
             time_of_day = math.floor(self.env.now % (60*24) / 60)
-            ED_arr = self.input_params.ED_arr.loc[time_of_day, self.year]
+            no_arr = self.input_params.ED_arr.loc[time_of_day, self.year]
+            #If more than 1 arrival within an hour, just use this as the time out.
+            if no_arr > 1:
+                ED_arr = round(60 / self.input_params.ED_arr.loc[time_of_day, self.year])
+            else:
+                #Otherwise, wait until next hour then check whent he next
+                #arrival will be
+                ED_arr = 60
+                arr_bool = True
+                while arr_bool:
+                    #Check the number of hourly arrivals for next hour and use
+                    #arrival numbers as probability.
+                    time_of_day = time_of_day + 1 if time_of_day != 23 else 0
+                    no_arr = self.input_params.ED_arr.loc[time_of_day, self.year]
+                    if random.random() < no_arr:
+                        #there will be an arrival next hour, escape while loop.
+                        arr_bool = False
+                    else:
+                        #If no arrival in the next hour, add to the time out
+                        #and check the hour after that
+                        ED_arr += 60
             sampled_interarrival = round(random.expovariate(1.0 / ED_arr))
             yield self.env.timeout(sampled_interarrival)
     
@@ -190,9 +224,30 @@ class mru_model:
             p.arrival_year = self.year
             #begin patient ED process
             self.env.process(self.MRU_journey(p))
-            #randomly sample the time until the next patient arrival
+
+                        #randomly sample the time until the next patient arrival
             time_of_day = math.floor(self.env.now % (60*24) / 60)
-            EXT_arr = self.input_params.EXT_arr.loc[time_of_day, self.year]
+            no_arr = self.input_params.EXT_arr.loc[time_of_day, self.year]
+            #If more than 1 arrival within an hour, just use this as the time out.
+            if no_arr > 1:
+                EXT_arr = round(60 / self.input_params.EXT_arr.loc[time_of_day, self.year])
+            else:
+                #Otherwise, wait until next hour then check whent he next
+                #arrival will be
+                EXT_arr = 60
+                arr_bool = True
+                while arr_bool:
+                    #Check the number of hourly arrivals for next hour and use
+                    #arrival numbers as probability.
+                    time_of_day = time_of_day + 1 if time_of_day != 23 else 0
+                    no_arr = self.input_params.EXT_arr.loc[time_of_day, self.year]
+                    if random.random() < no_arr:
+                        #there will be an arrival next hour, escape while loop.
+                        arr_bool = False
+                    else:
+                        #If no arrival in the next hour, add to the time out
+                        #and check the hour after that
+                        EXT_arr += 60
             sampled_interarrival = round(random.expovariate(1.0 / EXT_arr))
             yield self.env.timeout(sampled_interarrival)
     
@@ -325,6 +380,22 @@ def q75(x):
     return x.quantile(0.75)
 font_size = 24
 
+#Summary numbers
+print('---------------------')
+print('Arrivals Summary:')
+print(pd.concat([pat.groupby(['Run',  'Simulation Arrival Day', 'Arrival Year'],as_index=False)['Patient ID'].count()
+         .groupby(['Arrival Year'])['Patient ID']
+         .agg(['min', q25, 'mean', q75, 'max']),
+    pat.groupby(['Run', 'Arrival Method', 'Simulation Arrival Day', 'Arrival Year'],
+                  as_index=False)['Patient ID'].count()
+         .groupby(['Arrival Method', 'Arrival Year'])['Patient ID']
+         .agg(['min', q25, 'mean', q75, 'max'])
+         ]))
+print('---------------------')
+print('Occupancy Summary:')
+print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max']).round(2))
+print('---------------------')
+
 ####arrivals by hour of day
 MRU_arrivals = (pat.groupby(['Run', 'Simulation Arrival Day', 'MRU Arrival Hour'], as_index=False)
                 ['Patient ID'].count()
@@ -410,15 +481,3 @@ axs.set_ylabel('Hours Waited', fontsize=font_size)
 axs.tick_params(axis='both',  which='major', labelsize=font_size)
 plt.savefig(f'C:/Users/obriene/Projects/Discrete Event Simulation/MRU model/Results/Average Wait for Bed Time - {default_params.run_name}.png', bbox_inches='tight', dpi=1200)
 plt.close()
-
-#Summary numbers
-print('---------------------')
-print('Arrivals Summary:')
-print(pat.groupby(['Run', 'Simulation Arrival Day', 'Arrival Year'],
-                  as_index=False)['Patient ID'].count()
-         .groupby('Arrival Year')['Patient ID']
-         .agg(['min', q25, 'mean', q75, 'max']))
-print('---------------------')
-print('Occupancy Summary:')
-print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max']).round(2))
-print('---------------------')
