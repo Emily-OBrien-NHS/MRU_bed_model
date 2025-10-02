@@ -18,7 +18,7 @@ class default_params():
     run_years = 10
     run_time = run_years * (365 * (60*24))
     #run_time = 525600
-    iterations = 10
+    iterations = 100
     occ_sample_time = 60
     #arrivals
     sdmart_engine = create_engine('mssql+pyodbc://@SDMartDataLive2/InfoDB?'\
@@ -378,6 +378,14 @@ def q25(x):
     return x.quantile(0.25)
 def q75(x):
     return x.quantile(0.75)
+def q80(x):
+    return x.quantile(0.80)
+def q85(x):
+    return x.quantile(0.85)
+def q90(x):
+    return x.quantile(0.90)
+def q95(x):
+    return x.quantile(0.95)
 font_size = 24
 
 #Summary numbers
@@ -385,15 +393,15 @@ print('---------------------')
 print('Arrivals Summary:')
 print(pd.concat([pat.groupby(['Run',  'Simulation Arrival Day', 'Arrival Year'],as_index=False)['Patient ID'].count()
          .groupby(['Arrival Year'])['Patient ID']
-         .agg(['min', q25, 'mean', q75, 'max']),
+         .agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']),
     pat.groupby(['Run', 'Arrival Method', 'Simulation Arrival Day', 'Arrival Year'],
                   as_index=False)['Patient ID'].count()
          .groupby(['Arrival Method', 'Arrival Year'])['Patient ID']
-         .agg(['min', q25, 'mean', q75, 'max'])
+         .agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max'])
          ]))
 print('---------------------')
 print('Occupancy Summary:')
-print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max']).round(2))
+print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']).round(2))
 print('---------------------')
 
 ####arrivals by hour of day
@@ -409,7 +417,7 @@ MRU_discharges.name = 'Discharges'
 #combine
 MRU_in_out = pd.DataFrame([MRU_arrivals, MRU_discharges]).T
 #occupancy
-MRU_occupancy = occ.groupby('hour')['MRU Occupancy'].agg(['min', q25, 'mean', q75, 'max'])
+MRU_occupancy = occ.groupby('hour')['MRU Occupancy'].agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max'])
 hours = MRU_occupancy.index
 
 #plot
