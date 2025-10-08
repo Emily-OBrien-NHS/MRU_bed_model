@@ -129,8 +129,10 @@ class default_params():
 
     #LoS
     mean_ED_los = 120
+    min_MRU_los = 60*1.5
     mean_MRU_los = 60*8
     max_MRU_los = 60*24
+    bed_turnaround = 60
     #Discharge times
     dis_start = 8
     dis_end = 22
@@ -264,12 +266,13 @@ class mru_model:
             sampled_MRU_time = round((random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los)))
             #If sampled LoS is greater than the max, resample until under.
-            while sampled_MRU_time > self.input_params.max_MRU_los:
+            while ((sampled_MRU_time < self.input_params.min_MRU_los) 
+                   or (sampled_MRU_time > self.input_params.max_MRU_los)):
                 sampled_MRU_time = round((random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los)))
             #Patient holds MRU bed for the sampled MRU time
-            yield self.env.timeout(sampled_MRU_time)
-        patient.MRU_leave_time = self.env.now
+            yield self.env.timeout(sampled_MRU_time + self.input_params.bed_turnaround)
+        patient.MRU_leave_time = self.env.now - self.input_params.bed_turnaround
         self.store_patient_results(patient)
 
     def ED_to_MRU_journey(self, patient):
@@ -292,12 +295,13 @@ class mru_model:
             sampled_MRU_time = round(random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los))
             #If sampled LoS is greater than the max, resample until under.
-            while sampled_MRU_time > self.input_params.max_MRU_los:
+            while ((sampled_MRU_time < self.input_params.min_MRU_los) 
+                   or (sampled_MRU_time > self.input_params.max_MRU_los)):
                 sampled_MRU_time = round((random.expovariate(1.0
                                                 / self.input_params.mean_MRU_los)))
             #Patient holds MRU bed for the sampled MRU time
-            yield self.env.timeout(sampled_MRU_time)
-        patient.MRU_leave_time = self.env.now
+            yield self.env.timeout(sampled_MRU_time + self.input_params.bed_turnaround)
+        patient.MRU_leave_time = self.env.now - self.input_params.bed_turnaround
         self.store_patient_results(patient)
 
 ###################RECORD RESULTS####################
@@ -391,18 +395,54 @@ font_size = 24
 #Summary numbers
 print('---------------------')
 print('Arrivals Summary:')
-print(pd.concat([pat.groupby(['Run',  'Simulation Arrival Day', 'Arrival Year'],as_index=False)['Patient ID'].count()
+print(pat.groupby(['Run',  'Simulation Arrival Day', 'Arrival Year'],as_index=False)['Patient ID'].count()
          .groupby(['Arrival Year'])['Patient ID']
-         .agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']),
-    pat.groupby(['Run', 'Arrival Method', 'Simulation Arrival Day', 'Arrival Year'],
-                  as_index=False)['Patient ID'].count()
-         .groupby(['Arrival Method', 'Arrival Year'])['Patient ID']
-         .agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max'])
-         ]))
+         .agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']))
+
 print('---------------------')
-print('Occupancy Summary:')
-print(occ.groupby('Year')['MRU Occupancy'].agg(['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']).round(2))
-print('---------------------')
+print('Daily Occupancy Quartiles:')
+#Get only occupancy during opening hours on a week day, as this is higher than
+#weekends.  Print the quartiles
+occ_sum = occ.groupby('Year')['MRU Occupancy'].agg(
+                ['min', q25, 'mean', q75, q80, q85, q90, q95, 'max']).round(2)
+print(occ_sum)
+
+print('-----------------------')
+print('Arrivals Based on Occupancy Quartiles:')
+#Find the days where occupancy reaches those quartiles.
+now = occ_sum.iloc[0]
+fut = occ_sum.iloc[-1]
+def arrivals_for_quartiles(row, label):
+    arrs = []
+    for quart in row.round():
+        #Get where the number of beds occured, and the time 24 hours ago
+        days = occ.loc[(occ['MRU Occupancy'] == quart)
+                       & (occ['Year'] == int(label)), ['Run', 'Time']].copy()
+        days['24hour'] = (days['Time'] - (60*24)).clip(lower=0)
+        #remove any negative times
+        days = days.loc[days['24hour'] > 0].copy()
+        #Add id for each instance, get list of all times in last 24 hours and explode
+        days['24hour ID'] = [i for i in range(len(days))]
+        days['times'] = [[i for i in range(x, y)] for x , y in zip( days['24hour'], days['Time'])]
+        days = days.explode('times')
+        #Merge this back onto the patients table to get the average number of
+        #patients 24hours before that number was hit.
+        arrivals = (days.merge(pat, left_on=['Run', 'times'],
+                              right_on=['Run', 'MRU Arrival Time'])
+                              .groupby('24hour ID')['Patient ID'].count().mean())
+        arrs.append(arrivals)
+    out = pd.DataFrame([arrs], columns=row.index, index=[label]).round(2)
+    return out
+
+print(arrivals_for_quartiles(now, '2025'))
+print(arrivals_for_quartiles(fut, '2034'))
+print('-----------------------')
+
+
+
+
+
+
 
 ####arrivals by hour of day
 MRU_arrivals = (pat.groupby(['Run', 'Simulation Arrival Day', 'MRU Arrival Hour'], as_index=False)
